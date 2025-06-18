@@ -49,4 +49,4 @@ hook::enable_hook(NtOpenProcess_Hook);
 
 ```
 
-# any problums please open an issue.
+# any problems please open an issue.
