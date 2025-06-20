@@ -4,22 +4,19 @@
 #include <intrin.h>
 
 namespace hook {
+    KSPIN_LOCK hook_spinlock;
+    void initialize_spinlock() {
+        KeInitializeSpinLock(&hook_spinlock);
+    }
+
 #if _M_IX86
-    /*
-        0:  b8 00 00 00 00          mov    eax,0x0
-        5:  ff e0                   jmp    eax
-    */
     const unsigned char jmp_code[] = { 0xB8, 0x00, 0x00, 0x00, 0x00, 0xFF, 0xE0 };
     const size_t jmp_size = sizeof(jmp_code);
 #elif _M_X64
-    /*
-        0:  48 b8 00 00 00 00 00    movabs rax,0x0
-        7:  00 00 00
-        a:  ff e0                   jmp    rax
-    */
     const unsigned char jmp_code[] = { 0x48, 0xB8, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xFF, 0xE0 };
     const size_t jmp_size = sizeof(jmp_code);
 #endif
+
     inline bool RtlForceCopyMemory(void* address, const void* buffer, size_t size) {
         PHYSICAL_ADDRESS physical_address = MmGetPhysicalAddress(address);
         if (!physical_address.QuadPart)
@@ -49,20 +46,38 @@ namespace hook {
     hook_data hooks[max_hook_entries] = {};
 
     hook_data* get_hook(void* address) {
+        KIRQL irql;
+        KeAcquireSpinLock(&hook_spinlock, &irql);
+
+        hook_data* result = nullptr;
         for (__int32 idx = 0; idx < max_hook_entries; idx++) {
             hook_data* entry = &hooks[idx];
-            if (entry->function == address || entry->target == address)
-                return entry;
+            if (entry->function == address || entry->target == address) {
+                result = entry;
+                break;
+            }
         }
-        return nullptr;
+
+        KeReleaseSpinLock(&hook_spinlock, irql);
+        return result;
     }
 
     bool is_hooked(void* address) {
+        KIRQL irql;
+        KeAcquireSpinLock(&hook_spinlock, &irql);
+
         hook_data* entry = get_hook(address);
-        return entry && entry->enabled;
+        bool hooked = entry && entry->enabled;
+
+        KeReleaseSpinLock(&hook_spinlock, irql);
+        return hooked;
     }
 
     bool add_hook(void* function, void* target) {
+        KIRQL irql;
+        KeAcquireSpinLock(&hook_spinlock, &irql);
+
+        bool success = false;
         for (__int32 idx = 0; idx < max_hook_entries; idx++) {
             hook_data* entry = &hooks[idx];
             if (!entry->is_empty())
@@ -72,15 +87,23 @@ namespace hook {
             entry->function = function;
             entry->target = target;
             entry->enabled = false;
-            return true;
+            success = true;
+            break;
         }
-        return false;
+
+        KeReleaseSpinLock(&hook_spinlock, irql);
+        return success;
     }
 
     bool enable_hook(void* address) {
+        KIRQL irql;
+        KeAcquireSpinLock(&hook_spinlock, &irql);
+
         hook_data* entry = get_hook(address);
-        if (!entry || entry->enabled)
+        if (!entry || entry->enabled) {
+            KeReleaseSpinLock(&hook_spinlock, irql);
             return false;
+        }
 
         unsigned char jump_buffer[jmp_size];
         RtlCopyMemory(jump_buffer, jmp_code, jmp_size);
@@ -90,49 +113,73 @@ namespace hook {
         * (void**)(jump_buffer + 2) = entry->target;
 #endif
 
-        if (!RtlForceCopyMemory(entry->function, jump_buffer, jmp_size))
-            return false;
+        bool success = RtlForceCopyMemory(entry->function, jump_buffer, jmp_size);
+        if (success)
+            entry->enabled = true;
 
-        entry->enabled = true;
-        return true;
+        KeReleaseSpinLock(&hook_spinlock, irql);
+        return success;
     }
 
     bool disable_hook(void* address) {
+        KIRQL irql;
+        KeAcquireSpinLock(&hook_spinlock, &irql);
+
         hook_data* entry = get_hook(address);
-        if (!entry || !entry->enabled)
+        if (!entry || !entry->enabled) {
+            KeReleaseSpinLock(&hook_spinlock, irql);
             return false;
+        }
 
-        if (!RtlForceCopyMemory(entry->function, entry->original_bytes, jmp_size))
-            return false;
+        bool success = RtlForceCopyMemory(entry->function, entry->original_bytes, jmp_size);
+        if (success)
+            entry->enabled = false;
 
-        entry->enabled = false;
-        return true;
+        KeReleaseSpinLock(&hook_spinlock, irql);
+        return success;
     }
 
     void remove_hook(void* address) {
+        KIRQL irql;
+        KeAcquireSpinLock(&hook_spinlock, &irql);
+
         hook_data* entry = get_hook(address);
-        if (!entry)
+        if (!entry) {
+            KeReleaseSpinLock(&hook_spinlock, irql);
             return;
+        }
 
         if (entry->enabled)
             disable_hook(address);
 
         RtlZeroMemory(entry, sizeof(hook_data));
+
+        KeReleaseSpinLock(&hook_spinlock, irql);
     }
 
     void enable_all_hooks() {
+        KIRQL irql;
+        KeAcquireSpinLock(&hook_spinlock, &irql);
+
         for (__int32 idx = 0; idx < max_hook_entries; idx++) {
             hook_data* entry = &hooks[idx];
             if (!entry->is_empty() && !entry->enabled)
                 enable_hook(entry->function);
         }
+
+        KeReleaseSpinLock(&hook_spinlock, irql);
     }
 
     void disable_all_hooks() {
+        KIRQL irql;
+        KeAcquireSpinLock(&hook_spinlock, &irql);
+
         for (__int32 idx = 0; idx < max_hook_entries; idx++) {
             hook_data* entry = &hooks[idx];
             if (!entry->is_empty() && entry->enabled)
                 disable_hook(entry->function);
         }
+
+        KeReleaseSpinLock(&hook_spinlock, irql);
     }
 }
