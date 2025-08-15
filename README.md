@@ -1,3 +1,13 @@
+## notice
+
+this is not thread safe!
+
+meaning if one thread calls the hooked function
+and thread two calls the hooked function
+
+it will make the hook overwrite itself with a inline hook
+then the inline hook will be copied as the original code which its not.
+this can be solved using a spinlock.
 
 ## usage
 
